@@ -1,0 +1,15 @@
+{
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "kataphasis.png",
+          "name" : "kataphasis"
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}
