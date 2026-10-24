@@ -1,0 +1,237 @@
+name: macOS DMG
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: dmg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    runs-on: macos-26
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version --sdk macosx
+          sw_vers
+
+      - name: Generate the project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Import signing certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CERT_B64: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$CERT_B64" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p "$KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PWD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$CERT_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PWD" build.keychain
+          rm /tmp/cert.p12
+          security list-keychains
+          security find-identity -v -p codesigning
+          team=$(security find-identity -v -p codesigning |
+                 sed -n 's/.*"Developer ID Application: .*(\(.*\))".*/\1/p' |
+                 head -1)
+          if [ -z "$team" ]; then
+            echo "FAIL: no Developer ID Application identity was imported"
+            exit 1
+          fi
+          echo "SIGN_TEAM=$team" >> "$GITHUB_ENV"
+
+      - name: Notary credentials
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PWD: ${{ secrets.APPLE_ID_PWD }}
+        run: |
+          xcrun notarytool history \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PWD" \
+            --team-id "$SIGN_TEAM" \
+            --output-format json > /dev/null
+          echo "the notary service accepted these credentials"
+
+      - name: Build (Release, unsigned)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          xcodebuild -project Kataphasis.xcodeproj -scheme Kataphasis \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          echo "APP=DerivedData/Build/Products/Release/Kataphasis.app" \
+            >> "$GITHUB_ENV"
+
+      - name: Build (Release, signed)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          xcodebuild archive \
+            -project Kataphasis.xcodeproj -scheme Kataphasis \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            -archivePath build/Kataphasis.xcarchive \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$SIGN_TEAM" \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ENABLE_HARDENED_RUNTIME=YES \
+            OTHER_CODE_SIGN_FLAGS="--timestamp"
+          cat > /tmp/export.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>developer-id</string>
+            <key>teamID</key><string>$SIGN_TEAM</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key>
+            <string>Developer ID Application</string>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/Kataphasis.xcarchive \
+            -exportOptionsPlist /tmp/export.plist \
+            -exportPath export
+          echo "APP=export/Kataphasis.app" >> "$GITHUB_ENV"
+
+      - name: No debug entitlement survived the build
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ents=$(codesign -d --entitlements :- "$APP" 2>/dev/null)
+          echo "$ents"
+          if printf '%s' "$ents" | grep -q "get-task-allow"; then
+            echo "FAIL: the signed app still requests get-task-allow"
+            exit 1
+          fi
+          echo "no get-task-allow in the signed app"
+
+      - name: Notary helper
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cat > /tmp/notarize.sh <<'SH'
+          set -eu -o pipefail
+          target=$1
+          submission=$(mktemp)
+          xcrun notarytool submit "$target" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PWD" \
+            --team-id "$SIGN_TEAM" \
+            --wait \
+            --output-format json | tee "$submission"
+          id=$(python3 -c "import json;print(json.load(open('$submission'))['id'])")
+          status=$(python3 -c "import json;print(json.load(open('$submission'))['status'])")
+          echo "Notarization status for $target: $status"
+          if [ "$status" != "Accepted" ]; then
+            echo "::group::Apple notary log for $id"
+            xcrun notarytool log "$id" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PWD" \
+              --team-id "$SIGN_TEAM"
+            echo "::endgroup::"
+            exit 1
+          fi
+          SH
+          chmod +x /tmp/notarize.sh
+
+      - name: Notarize and staple the app
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PWD: ${{ secrets.APPLE_ID_PWD }}
+        run: |
+          ditto -c -k --keepParent "$APP" /tmp/Kataphasis.zip
+          sh /tmp/notarize.sh /tmp/Kataphasis.zip
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+
+      - name: Stage app for DMG
+        run: |
+          mkdir -p dmg-staging
+          cp -R "$APP" dmg-staging/Kataphasis.app
+          ln -s /Applications dmg-staging/Applications
+          cp LICENSE dmg-staging/LICENSE
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Kataphasis" \
+            -srcfolder dmg-staging \
+            -ov \
+            -format UDZO \
+            -fs HFS+ \
+            Kataphasis.dmg
+
+      - name: Sign DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          codesign --force --sign "Developer ID Application" \
+            --timestamp --options runtime \
+            Kataphasis.dmg
+          codesign -dv --verbose=2 Kataphasis.dmg || true
+
+      - name: Notarize and staple the DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PWD: ${{ secrets.APPLE_ID_PWD }}
+        run: |
+          sh /tmp/notarize.sh Kataphasis.dmg
+          xcrun stapler staple Kataphasis.dmg
+          xcrun stapler validate Kataphasis.dmg
+
+      - name: Gatekeeper verdict
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          hdiutil attach Kataphasis.dmg -nobrowse -mountpoint /tmp/dmg
+          spctl -a -t exec -vv /tmp/dmg/Kataphasis.app
+          hdiutil detach /tmp/dmg
+
+      - name: DMG digest
+        run: shasum -a 256 Kataphasis.dmg | tee Kataphasis.dmg.sha256
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Kataphasis.dmg
+          path: |
+            Kataphasis.dmg
+            Kataphasis.dmg.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            Kataphasis.dmg Kataphasis.dmg.sha256

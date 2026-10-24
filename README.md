@@ -47,6 +47,20 @@ search pages, and Kataphasis reads those pages with a script. Use the
 Google option knowing that, and expect Google to ask for a captcha now
 and then.
 
+## Install
+
+macOS 14 or later, Apple Silicon or Intel. Download Kataphasis.dmg
+from the [latest release](https://github.com/leok7v/kataphasis/releases/latest),
+or install it with Homebrew:
+
+    brew tap leok7v/tap
+    brew trust leok7v/tap
+    brew install --cask kataphasis
+
+The middle line is Homebrew's gate on taps that are not its own.
+Homebrew asks for it by name if you skip it. The app is signed with a Developer
+ID certificate and notarized by Apple.
+
 ## Build and run
 
 macOS 14 or later, with the Swift compiler from Xcode or the command

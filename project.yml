@@ -9,12 +9,13 @@ targets:
     platform: macOS
     sources:
       - kataphasis.swift
+    configFiles:
+      Debug: config/version.xcconfig
+      Release: config/version.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leok7v.kataphasis
         PRODUCT_NAME: Kataphasis
-        MARKETING_VERSION: "0.1"
-        CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Kataphasis
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.reference
