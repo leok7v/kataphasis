@@ -1,0 +1,23 @@
+name: Kataphasis
+options:
+  bundleIdPrefix: com.leok7v
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  Kataphasis:
+    type: application
+    platform: macOS
+    sources:
+      - kataphasis.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leok7v.kataphasis
+        PRODUCT_NAME: Kataphasis
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Kataphasis
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.reference
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_IDENTITY: "-"
+        SWIFT_VERSION: "6.0"

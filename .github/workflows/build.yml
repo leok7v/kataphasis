@@ -1,0 +1,8 @@
+name: build
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swiftc -parse-as-library -O kataphasis.swift -o kataphasis
